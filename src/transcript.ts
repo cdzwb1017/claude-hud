@@ -238,6 +238,7 @@ export async function parseTranscript(transcriptPath: string): Promise<Transcrip
   const agentMap = new Map<string, AgentEntry>();
   let latestTodos: TodoItem[] = [];
   const taskIdToIndex = new Map<string, number>();
+  const queueCompletionMap = new Map<string, Date>();
   let latestSlug: string | undefined;
   let customTitle: string | undefined;
   let lastCompactBoundaryAt: Date | undefined;
@@ -292,6 +293,19 @@ export async function parseTranscript(transcriptPath: string): Promise<Transcrip
             }
           }
         }
+        // Capture accurate background-agent completion timestamps from queue-operation entries.
+        // The tool_result timestamp in the parent transcript is written at launch time, not
+        // when the agent actually finishes, so we override with the enqueue timestamp.
+        if (entry.type === 'queue-operation' && entry.operation === 'enqueue' && entry.content) {
+          const taskIdMatch = entry.content.match(/<task-id>([^<]+)<\/task-id>/);
+          const toolUseIdMatch = entry.content.match(/<tool-use-id>([^<]+)<\/tool-use-id>/);
+          if (taskIdMatch && toolUseIdMatch && entry.timestamp) {
+            const ts = new Date(entry.timestamp);
+            if (!Number.isNaN(ts.getTime())) {
+              queueCompletionMap.set(toolUseIdMatch[1], ts);
+            }
+          }
+        }
         processEntry(entry, toolMap, agentMap, taskIdToIndex, latestTodos, result);
       } catch {
         // Skip malformed lines
@@ -303,6 +317,13 @@ export async function parseTranscript(transcriptPath: string): Promise<Transcrip
     // Return partial results on error
   }
 
+  // Override agent endTimes with accurate queue-operation timestamps where available
+  for (const [toolUseId, endTime] of queueCompletionMap) {
+    const agent = agentMap.get(toolUseId);
+    if (agent) {
+      agent.endTime = endTime;
+    }
+  }
   result.tools = Array.from(toolMap.values()).slice(-20);
   result.agents = Array.from(agentMap.values()).slice(-10);
   result.todos = latestTodos;
